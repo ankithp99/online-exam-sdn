@@ -5,12 +5,32 @@ from os_ken.controller.handler import set_ev_cls
 from os_ken.ofproto import ofproto_v1_3
 from os_ken.lib.packet import packet, ethernet, ether_types
 
+
 class OnlineExamController(app_manager.OSKenApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(OnlineExamController, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
+        self.mac_to_port = {}
         self.logger.info("Online Examination SDN Controller started")
+
+    def add_flow(self, datapath, priority, match, actions):
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        instructions = [
+            parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS, actions
+            )
+        ]
+
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=priority,
+            match=match,
+            instructions=instructions
+        )
+        datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -18,20 +38,16 @@ class OnlineExamController(app_manager.OSKenApp):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                           ofproto.OFPCML_NO_BUFFER)]
-        instructions = [
-            parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)
+        actions = [
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER
+            )
         ]
 
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=0,
-            match=match,
-            instructions=instructions
+        self.add_flow(
+            datapath, 0, parser.OFPMatch(), actions
         )
-        datapath.send_msg(mod)
         self.logger.info("Installed table-miss rule on switch %s", datapath.id)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -40,6 +56,7 @@ class OnlineExamController(app_manager.OSKenApp):
         datapath = msg.datapath
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
+        in_port = msg.match["in_port"]
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
@@ -47,12 +64,35 @@ class OnlineExamController(app_manager.OSKenApp):
         if eth is None or eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
 
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        match = parser.OFPMatch(in_port=msg.match["in_port"])
+        dpid = datapath.id
+        src = eth.src
+        dst = eth.dst
+
+        self.mac_to_port.setdefault(dpid, {})
+        self.mac_to_port[dpid][src] = in_port
+
+        out_port = self.mac_to_port[dpid].get(
+            dst, ofproto.OFPP_FLOOD
+        )
+
+        actions = [parser.OFPActionOutput(out_port)]
+
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(
+                in_port=in_port,
+                eth_src=src,
+                eth_dst=dst
+            )
+            self.add_flow(datapath, 10, match, actions)
+            self.logger.info(
+                "Installed forwarding rule: %s -> %s via port %s",
+                src, dst, out_port
+            )
+
         out = parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=ofproto.OFP_NO_BUFFER,
-            in_port=msg.match["in_port"],
+            in_port=in_port,
             actions=actions,
             data=msg.data
         )
