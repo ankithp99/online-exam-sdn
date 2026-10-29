@@ -1,4 +1,3 @@
-
 import os
 import time
 
@@ -15,7 +14,7 @@ from os_ken.lib import hub
 from os_ken.lib.packet import packet, ethernet, ether_types
 
 
-# Configurable thresholds in bits per second.
+# Configurable traffic thresholds in bits per second.
 CONGESTION_THRESHOLD_BPS = int(
     os.getenv("CONGESTION_THRESHOLD_BPS", "100000")
 )
@@ -23,13 +22,11 @@ CLEAR_THRESHOLD_BPS = int(
     os.getenv("CLEAR_THRESHOLD_BPS", "50000")
 )
 POLL_INTERVAL = 5
-
-# Dedicated priority for the temporary UDP congestion filter.
 CONGESTION_FLOW_PRIORITY = 20
 
 
 class OnlineExamController(app_manager.OSKenApp):
-    """Learning switch with port monitoring and dynamic UDP filtering."""
+    """Learning switch with port monitoring and UDP congestion filtering."""
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
@@ -41,48 +38,40 @@ class OnlineExamController(app_manager.OSKenApp):
         self.previous_stats = {}
         self.congested_ports = set()
 
+        self.logger.info("Online Examination SDN Controller started")
         self.monitor_thread = hub.spawn(self._monitor_ports)
 
-    @set_ev_cls(ofp_event.EventOFPStateChange,
-                [MAIN_DISPATCHER, DEAD_DISPATCHER])
+    @set_ev_cls(
+        ofp_event.EventOFPStateChange,
+        [MAIN_DISPATCHER, DEAD_DISPATCHER],
+    )
     def state_change_handler(self, ev):
         datapath = ev.datapath
+        dpid = datapath.id
 
         if ev.state == MAIN_DISPATCHER:
-            self.datapaths[datapath.id] = datapath
-            self.logger.info("Switch connected: dpid=%s", datapath.id)
+            self.datapaths[dpid] = datapath
+            self.logger.info("Switch connected: dpid=%s", dpid)
 
         elif ev.state == DEAD_DISPATCHER:
-            self.datapaths.pop(datapath.id, None)
-            self.previous_stats.pop(datapath.id, None)
-
+            self.datapaths.pop(dpid, None)
+            self.previous_stats.pop(dpid, None)
             self.congested_ports = {
                 item for item in self.congested_ports
-                if item[0] != datapath.id
+                if item[0] != dpid
             }
+            self.logger.info("Switch disconnected: dpid=%s", dpid)
 
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
+    def add_flow(
+        self,
+        datapath,
+        priority,
+        match,
+        actions,
+        idle_timeout=60,
+    ):
         parser = datapath.ofproto_parser
-
-        # Send unmatched packets to the controller.
-        match = parser.OFPMatch()
-        actions = [
-            parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER,
-            )
-        ]
-
-        self.add_flow(datapath, 0, match, actions)
-        self.logger.info("OpenFlow 1.3 initialized for dpid=%s", datapath.id)
-
-    def add_flow(self, datapath, priority, match, actions,
-                 idle_timeout=60):
         ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
 
         instructions = [
             parser.OFPInstructionActions(
@@ -100,12 +89,44 @@ class OnlineExamController(app_manager.OSKenApp):
         )
         datapath.send_msg(mod)
 
+    @set_ev_cls(
+        ofp_event.EventOFPSwitchFeatures,
+        CONFIG_DISPATCHER,
+    )
+    def switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        actions = [
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER,
+            )
+        ]
+
+        # Keep the table-miss rule installed permanently.
+        self.add_flow(
+            datapath,
+            0,
+            parser.OFPMatch(),
+            actions,
+            idle_timeout=0,
+        )
+
+        self.logger.info(
+            "Installed table-miss rule on switch %s",
+            datapath.id,
+        )
+
     def request_port_stats(self, datapath):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
         request = parser.OFPPortStatsRequest(
-            datapath, 0, ofproto.OFPP_ANY
+            datapath,
+            0,
+            ofproto.OFPP_ANY,
         )
         datapath.send_msg(request)
 
@@ -117,12 +138,16 @@ class OnlineExamController(app_manager.OSKenApp):
                 except Exception as exc:
                     self.logger.warning(
                         "Could not request stats from dpid=%s: %s",
-                        datapath.id, exc
+                        datapath.id,
+                        exc,
                     )
 
             hub.sleep(POLL_INTERVAL)
 
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    @set_ev_cls(
+        ofp_event.EventOFPPortStatsReply,
+        MAIN_DISPATCHER,
+    )
     def port_stats_reply_handler(self, ev):
         datapath = ev.msg.datapath
         dpid = datapath.id
@@ -156,25 +181,34 @@ class OnlineExamController(app_manager.OSKenApp):
             if key not in self.congested_ports:
                 if rate_bps >= CONGESTION_THRESHOLD_BPS:
                     self.congested_ports.add(key)
-                    self.set_udp_filter(datapath, port, enable=True)
+                    self.set_udp_filter(
+                        datapath, port, enable=True
+                    )
 
                     self.logger.warning(
                         "CONGESTION: dpid=%s port=%s rate=%.0f bps; "
-                        "temporary UDP ingress filter enabled",
-                        dpid, port, rate_bps
+                        "UDP filter enabled",
+                        dpid,
+                        port,
+                        rate_bps,
                     )
+
             elif rate_bps < CLEAR_THRESHOLD_BPS:
                 self.congested_ports.remove(key)
-                self.set_udp_filter(datapath, port, enable=False)
+                self.set_udp_filter(
+                    datapath, port, enable=False
+                )
 
                 self.logger.info(
-                    "CONGESTION CLEARED: dpid=%s port=%s rate=%.0f bps; "
-                    "UDP ingress filter removed",
-                    dpid, port, rate_bps
+                    "CONGESTION CLEARED: dpid=%s port=%s "
+                    "rate=%.0f bps; UDP filter removed",
+                    dpid,
+                    port,
+                    rate_bps,
                 )
 
     def set_udp_filter(self, datapath, port, enable):
-        """Filter IPv4 UDP packets arriving on one congested port."""
+        """Drop IPv4 UDP packets arriving on a congested port."""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -185,7 +219,7 @@ class OnlineExamController(app_manager.OSKenApp):
         )
 
         if enable:
-            # An empty action list drops matching packets.
+            # Empty actions mean matching packets are dropped.
             self.add_flow(
                 datapath,
                 CONGESTION_FLOW_PRIORITY,
@@ -194,7 +228,6 @@ class OnlineExamController(app_manager.OSKenApp):
                 idle_timeout=0,
             )
         else:
-            # Remove only this controller's matching congestion rule.
             mod = parser.OFPFlowMod(
                 datapath=datapath,
                 command=ofproto.OFPFC_DELETE,
@@ -206,24 +239,28 @@ class OnlineExamController(app_manager.OSKenApp):
             )
             datapath.send_msg(mod)
 
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    @set_ev_cls(
+        ofp_event.EventOFPPacketIn,
+        MAIN_DISPATCHER,
+    )
     def packet_in_handler(self, ev):
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
+        ofproto = datapath.ofproto
         in_port = msg.match["in_port"]
+
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
         if eth is None or eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
 
+        dpid = datapath.id
         src = eth.src
         dst = eth.dst
 
-        learned = self.mac_to_port.setdefault(datapath.id, {})
+        learned = self.mac_to_port.setdefault(dpid, {})
         learned[src] = in_port
 
         out_port = learned.get(dst, ofproto.OFPP_FLOOD)
@@ -242,6 +279,14 @@ class OnlineExamController(app_manager.OSKenApp):
                 actions,
             )
 
+            self.logger.info(
+                "Installed forwarding rule: %s -> %s via port %s",
+                src,
+                dst,
+                out_port,
+            )
+
+        # Include packet data only when the switch did not buffer it.
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
@@ -254,4 +299,3 @@ class OnlineExamController(app_manager.OSKenApp):
             data=data,
         )
         datapath.send_msg(out)
-
