@@ -1,24 +1,27 @@
+
+import json
 import socket
 import threading
-import json
 import time
+import select
 
-# Server configuration
 HOST = "0.0.0.0"
 PORT = 5000
-EXAM_DURATION = 120  # Exam duration in seconds
+EXAM_DURATION = 120
+REGISTRATION_TIMEOUT = 60
+MAX_CONCURRENT_CLIENTS = 20
+CLIENT_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CLIENTS)
 
-# Exam questions
 QUESTIONS = [
     {
         "question": "Which language is used for system programming?",
         "options": ["A. HTML", "B. C", "C. CSS", "D. SQL"],
-        "answer": "B"
+        "answer": "B",
     },
     {
         "question": "Which protocol provides reliable communication?",
         "options": ["A. UDP", "B. IP", "C. TCP", "D. ARP"],
-        "answer": "C"
+        "answer": "C",
     },
     {
         "question": "What does SDN stand for?",
@@ -26,88 +29,108 @@ QUESTIONS = [
             "A. Software Defined Networking",
             "B. System Data Network",
             "C. Secure Digital Node",
-            "D. Simple Data Navigation"
+            "D. Simple Data Navigation",
         ],
-        "answer": "A"
+        "answer": "A",
     },
     {
         "question": "Which data structure follows FIFO?",
         "options": ["A. Stack", "B. Queue", "C. Tree", "D. Graph"],
-        "answer": "B"
+        "answer": "B",
     },
     {
         "question": "Which protocol is connectionless?",
         "options": ["A. TCP", "B. HTTP", "C. FTP", "D. UDP"],
-        "answer": "D"
-    }
+        "answer": "D",
+    },
 ]
 
 
 def send_message(connection, message):
-    """Send one JSON message followed by a newline."""
-    data = json.dumps(message) + "\n"
-    connection.sendall(data.encode("utf-8"))
+    """Send a JSON message followed by a newline."""
+    payload = json.dumps(message) + "\n"
+    connection.sendall(payload.encode("utf-8"))
 
 
-def receive_message(reader):
-    """Receive one JSON message."""
-    line = reader.readline()
+def receive_message(connection, state, deadline):
+    """
+    Receive one newline-delimited JSON message before a monotonic deadline.
+    Uses the raw socket consistently to avoid buffered-reader/select issues.
+    """
+    while True:
+        if b"\n" in state["buffer"]:
+            line, _, remainder = state["buffer"].partition(b"\n")
+            state["buffer"] = bytearray(remainder)
 
-    if not line:
-        return None
+            if not line.strip():
+                continue
 
-    return json.loads(line)
+            return json.loads(line.decode("utf-8"))
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Deadline expired")
+
+        readable, _, _ = select.select(
+            [connection], [], [], remaining
+        )
+        if not readable:
+            raise TimeoutError("Deadline expired")
+
+        chunk = connection.recv(4096)
+        if not chunk:
+            return None
+
+        state["buffer"].extend(chunk)
 
 
 def handle_client(connection, address):
-    """Handle one examination client."""
-    print(f"[CONNECTED] Client {address}")
+    student_name = "Student"
+    state = {"buffer": bytearray()}
+    start_time = None
+    score = 0
+    answers = []
 
-    reader = None
+    print(f"[CONNECTED] {address}")
 
     try:
-        reader = connection.makefile("r", encoding="utf-8")
-
-        # Ask the student for their name
+        connection.setblocking(True)
         send_message(connection, {
             "type": "welcome",
-            "message": "Welcome to the Online Examination Network!"
+            "message": "Welcome to the Online Examination Network.",
         })
 
-        message = receive_message(reader)
+        try:
+            message = receive_message(
+                connection,
+                state,
+                time.monotonic() + REGISTRATION_TIMEOUT,
+            )
+        except TimeoutError:
+            print(f"[TIMEOUT] Registration timed out for {address}")
+            return
 
-        if not message or message.get("type") != "register":
+        if not isinstance(message, dict) or message.get("type") != "register":
             send_message(connection, {
                 "type": "error",
-                "message": "Please register before starting the exam."
+                "message": "Valid registration is required.",
             })
             return
 
-        student_name = str(message.get("name", "Student")).strip()
-
-        if not student_name:
-            student_name = "Student"
-
-        print(f"[EXAM STARTED] Student: {student_name}")
-
-        # Start the examination timer
-        start_time = time.time()
-        score = 0
-        answers = []
+        student_name = str(message.get("name", "Student")).strip() or "Student"
+        start_time = time.monotonic()
+        deadline = start_time + EXAM_DURATION
 
         send_message(connection, {
             "type": "exam_started",
-            "message": f"Exam started! You have {EXAM_DURATION} seconds.",
             "duration": EXAM_DURATION,
-            "total_questions": len(QUESTIONS)
+            "message": "Exam started. Good luck!",
         })
 
-        # Send questions one by one
         for index, question in enumerate(QUESTIONS):
-            elapsed = time.time() - start_time
-            remaining = max(0, int(EXAM_DURATION - elapsed))
-
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
+                print(f"[TIMEOUT] Exam expired for {student_name}")
                 break
 
             send_message(connection, {
@@ -116,117 +139,137 @@ def handle_client(connection, address):
                 "total": len(QUESTIONS),
                 "question": question["question"],
                 "options": question["options"],
-                "time_remaining": remaining
+                "time_remaining": max(0, int(remaining)),
             })
 
-            # Receive the student's answer
-            message = receive_message(reader)
+            try:
+                message = receive_message(connection, state, deadline)
+            except TimeoutError:
+                print(f"[TIMEOUT] No answer before deadline: {student_name}")
+                break
 
             if message is None:
                 print(f"[DISCONNECTED] {student_name}")
                 return
 
-            # Check the timer after receiving the answer
-            elapsed = time.time() - start_time
-
-            if elapsed > EXAM_DURATION:
+            # Reject an answer if the deadline passed while it was received.
+            if time.monotonic() >= deadline:
+                print(f"[LATE ANSWER REJECTED] {student_name}")
                 break
 
-            answer = str(message.get("answer", "")).strip().upper()
+            if not isinstance(message, dict) or message.get("type") != "answer":
+                answer = ""
+            else:
+                answer = str(message.get("answer", "")).strip().upper()
 
-            if answer not in ["A", "B", "C", "D"]:
+            if answer not in ("A", "B", "C", "D"):
                 answer = ""
 
             correct = answer == question["answer"]
-
             if correct:
                 score += 1
 
             answers.append({
                 "question": index + 1,
                 "submitted_answer": answer or "Not answered",
-                "correct": correct
+                "correct": correct,
             })
 
             send_message(connection, {
                 "type": "answer_received",
                 "message": "Answer recorded.",
-                "correct": correct
             })
 
-        # Calculate final result
-        elapsed = int(time.time() - start_time)
-        percentage = (score / len(QUESTIONS)) * 100
+        elapsed = 0
+        if start_time is not None:
+            elapsed = min(
+                int(time.monotonic() - start_time),
+                EXAM_DURATION,
+            )
 
-        send_message(connection, {
+        result = {
             "type": "result",
             "student": student_name,
             "score": score,
             "total": len(QUESTIONS),
-            "percentage": round(percentage, 2),
+            "percentage": round(score / len(QUESTIONS) * 100, 2),
             "time_taken": elapsed,
-            "answers_recorded": len(answers)
-        })
+            "answers_recorded": len(answers),
+        }
 
+        send_message(connection, result)
         print(
-            f"[RESULT] {student_name}: "
-            f"{score}/{len(QUESTIONS)} ({percentage:.2f}%)"
+            f"[RESULT] {student_name}: {score}/{len(QUESTIONS)} "
+            f"({result['percentage']}%)"
         )
 
     except (ConnectionResetError, BrokenPipeError):
-        print(f"[CONNECTION ERROR] Client {address} disconnected.")
-
-    except (json.JSONDecodeError, OSError) as error:
-        print(f"[ERROR] Client {address}: {error}")
-
-    except Exception as error:
-        print(f"[UNEXPECTED ERROR] Client {address}: {error}")
-
+        print(f"[DISCONNECTED] {student_name} disconnected unexpectedly.")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"[INVALID MESSAGE] {address}: {exc}")
+    except OSError as exc:
+        print(f"[SOCKET ERROR] {address}: {exc}")
+    except Exception as exc:
+        print(f"[ERROR] {address}: {exc}")
     finally:
-        if reader is not None:
-            reader.close()
-
         connection.close()
-        print(f"[DISCONNECTED] Client {address}")
+        print(f"[CLOSED] {address}")
 
 
 def start_server():
-    """Start the TCP examination server."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Allow the port to be reused after restarting the server
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    server.bind((HOST, PORT))
-    server.listen(10)
-
-    print("=" * 50)
-    print(" ONLINE EXAMINATION NETWORK SERVER")
-    print("=" * 50)
-    print(f"Listening on {HOST}:{PORT}")
-    print("Waiting for students to connect...")
-    print("Press Ctrl+C to stop the server.")
-    print("=" * 50)
-
     try:
+        server.bind((HOST, PORT))
+        server.listen(10)
+
+        print("=" * 50)
+        print("ONLINE EXAMINATION NETWORK SERVER")
+        print("=" * 50)
+        print(f"Listening on {HOST}:{PORT}")
+        print(f"Exam duration: {EXAM_DURATION} seconds")
+        print("Waiting for students to connect...")
+        print("Press Ctrl+C to stop the server.")
+
         while True:
             connection, address = server.accept()
+            if not CLIENT_SLOTS.acquire(blocking=False):
+                try:
+                    send_message(connection, {
+                        "type": "error",
+                        "message": "The exam server is full. Please try again shortly.",
+                    })
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+                print(f"[BUSY] Rejected connection from {address}")
+                continue
 
-            # Each student gets a separate thread
-            client_thread = threading.Thread(
-                target=handle_client,
+            thread = threading.Thread(
+                target=serve_client,
                 args=(connection, address),
-                daemon=True
+                daemon=True,
             )
-
-            client_thread.start()
+            thread.start()
 
     except KeyboardInterrupt:
-        print("\n[SERVER] Shutting down.")
-
+        print("\nServer shutting down.")
+    except OSError as exc:
+        print(f"Server socket error: {exc}")
     finally:
         server.close()
 
 
+def serve_client(connection, address):
+    """Run one exam session and always return its capacity slot."""
+    try:
+        handle_client(connection, address)
+    finally:
+        CLIENT_SLOTS.release()
+
+
 if __name__ == "__main__":
     start_server()
+

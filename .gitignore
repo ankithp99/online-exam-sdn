@@ -5,3 +5,17 @@ __pycache__/
 .env
 .DS_Store
 *.log
+# Python virtual environments
+.venv/
+.venv-sdn/
+.venv-osken/
+.venv-osken31/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Backup files
+*.backup
+*.change3-backup
+*.change4-backup
