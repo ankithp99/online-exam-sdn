@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#17284d">
+  <title>ExamNet | Candidate Login</title><link rel="stylesheet" href="styles.css">
+</head>
+<body class="login-bg">
+  <main class="login-shell">
+    <section class="login-card">
+      <div class="brand"><span class="brand-mark">E</span><span>ExamNet <small>ONLINE EXAMINATION</small></span></div>
+      <div class="eyebrow">CANDIDATE PORTAL</div>
+      <h1>Welcome back.</h1>
+      <p class="muted">Enter your candidate details to begin your examination.</p>
+      <form id="loginForm" class="login-form">
+        <label for="candidateName">Full name</label>
+        <input id="candidateName" name="candidateName" autocomplete="name" maxlength="80" placeholder="e.g. Asha Kumar" required aria-describedby="loginError">
+        <label for="candidateId">Candidate ID</label>
+        <input id="candidateId" name="candidateId" autocomplete="off" maxlength="40" placeholder="e.g. EX-1024" required aria-describedby="loginError">
+        <button class="btn primary full" type="submit">Continue to exam <span>→</span></button>
+      </form>
+      <div id="connectionStatus" class="login-note" role="status" aria-live="polite"><span class="status-dot offline"></span> Checking web connection…</div>
+      <p id="loginError" class="login-error hidden" role="alert"></p>
+      <p class="tiny">Candidate ID is a demo label only. This project does not authenticate candidate identities.</p>
+    </section>
+    <aside class="login-aside" aria-label="Exam features">
+      <div class="aside-orb"></div><div class="aside-content">
+        <div class="eyebrow light">FOCUSED. FAIR. SIMPLE.</div>
+        <h2>Your exam.<br>One clear workspace.</h2>
+        <p>Answer questions, flag items to revisit, and review your progress before submitting.</p>
+        <div class="feature"><span>✓</span><div><b>Track every question</b><small>See answered and unanswered questions at a glance.</small></div></div>
+        <div class="feature"><span>⚑</span><div><b>Mark for review</b><small>Flag questions you want to return to later.</small></div></div>
+      </div>
+    </aside>
+  </main>
+  <script src="app.js"></script>
+</body></html>
