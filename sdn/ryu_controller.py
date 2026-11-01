@@ -12,6 +12,7 @@ from os_ken.controller.handler import (
 from os_ken.ofproto import ofproto_v1_3
 from os_ken.lib import hub
 from os_ken.lib.packet import packet, ethernet, ether_types
+from congestion import counter_rate_bps, congestion_transition
 
 
 # Configurable traffic thresholds in bits per second.
@@ -21,6 +22,10 @@ CONGESTION_THRESHOLD_BPS = int(
 CLEAR_THRESHOLD_BPS = int(
     os.getenv("CLEAR_THRESHOLD_BPS", "50000")
 )
+if CONGESTION_THRESHOLD_BPS < CLEAR_THRESHOLD_BPS:
+    raise ValueError(
+        "CONGESTION_THRESHOLD_BPS must be >= CLEAR_THRESHOLD_BPS"
+    )
 POLL_INTERVAL = 5
 CONGESTION_FLOW_PRIORITY = 20
 
@@ -56,10 +61,6 @@ class OnlineExamController(app_manager.OSKenApp):
         elif ev.state == DEAD_DISPATCHER:
             self.datapaths.pop(dpid, None)
             self.previous_stats.pop(dpid, None)
-            self.congested_ports = {
-                item for item in self.congested_ports
-                if item[0] != dpid
-            }
             self.logger.info("Switch disconnected: dpid=%s", dpid)
 
     def add_flow(
@@ -97,6 +98,23 @@ class OnlineExamController(app_manager.OSKenApp):
         datapath = ev.msg.datapath
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
+
+        # A switch may retain flows across a controller disconnect. Remove
+        # temporary congestion entries on reconnect; monitoring will create
+        # them again only after fresh counter samples confirm congestion.
+        stale_filter = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            table_id=0,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            priority=CONGESTION_FLOW_PRIORITY,
+            match=parser.OFPMatch(eth_type=0x0800, ip_proto=17),
+        )
+        datapath.send_msg(stale_filter)
+        self.congested_ports = {
+            item for item in self.congested_ports if item[0] != datapath.id
+        }
 
         actions = [
             parser.OFPActionOutput(
@@ -161,7 +179,10 @@ class OnlineExamController(app_manager.OSKenApp):
             if port >= datapath.ofproto.OFPP_MAX:
                 continue
 
-            total_bytes = stat.rx_bytes + stat.tx_bytes
+            # Filtering is applied to packets arriving on this port, so use
+            # the ingress (RX) counter. Summing RX and TX double-counts flows
+            # crossing a port and can trigger a drop in the wrong direction.
+            total_bytes = stat.rx_bytes
             old = previous.get(port)
             previous[port] = (total_bytes, now)
 
@@ -170,31 +191,25 @@ class OnlineExamController(app_manager.OSKenApp):
                 continue
 
             old_bytes, old_time = old
-            elapsed = now - old_time
-
-            if elapsed <= 0 or total_bytes < old_bytes:
+            rate_bps = counter_rate_bps(old_bytes, old_time, total_bytes, now)
+            if rate_bps is None:
                 continue
-
-            rate_bps = (total_bytes - old_bytes) * 8 / elapsed
             key = (dpid, port)
-
-            if key not in self.congested_ports:
-                if rate_bps >= CONGESTION_THRESHOLD_BPS:
-                    self.congested_ports.add(key)
-                    self.set_udp_filter(
-                        datapath, port, enable=True
-                    )
-
-                    self.logger.warning(
-                        "CONGESTION: dpid=%s port=%s rate=%.0f bps; "
-                        "UDP filter enabled",
-                        dpid,
-                        port,
-                        rate_bps,
-                    )
-
-            elif rate_bps < CLEAR_THRESHOLD_BPS:
-                self.congested_ports.remove(key)
+            transition = congestion_transition(
+                key in self.congested_ports,
+                rate_bps,
+                CONGESTION_THRESHOLD_BPS,
+                CLEAR_THRESHOLD_BPS,
+            )
+            if transition == "congested":
+                self.congested_ports.add(key)
+                self.set_udp_filter(datapath, port, enable=True)
+                self.logger.warning(
+                    "CONGESTION: dpid=%s ingress_port=%s rate=%.0f bps; "
+                    "UDP filter enabled", dpid, port, rate_bps,
+                )
+            elif transition == "clear":
+                self.congested_ports.discard(key)
                 self.set_udp_filter(
                     datapath, port, enable=False
                 )
@@ -230,8 +245,8 @@ class OnlineExamController(app_manager.OSKenApp):
         else:
             mod = parser.OFPFlowMod(
                 datapath=datapath,
-                command=ofproto.OFPFC_DELETE,
-                table_id=ofproto.OFPTT_ALL,
+                command=ofproto.OFPFC_DELETE_STRICT,
+                table_id=0,
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 priority=CONGESTION_FLOW_PRIORITY,
