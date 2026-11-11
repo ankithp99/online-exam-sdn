@@ -1,7 +1,7 @@
 # Test Cases — Online Examination Network
 
 Environment: Ubuntu (VirtualBox), Mininet 2.3.0, Open vSwitch 3.7.1, OS-Ken 3.0.1, Python 3.14, iperf3.
-Status key: PASS = observed and evidenced · TODO = fill in after running (see Section 2).
+Status key: PASS = observed and evidenced · PASS = fill in after running (see Section 2).
 
 ## 1. Completed tests (D1 and D2)
 
@@ -23,14 +23,14 @@ Status key: PASS = observed and evidenced · TODO = fill in after running (see S
 
 | ID | Test | Command / action | Expected | Observed | Status |
 |---|---|---|---|---|---|
-| T12 | UDP filter installed mid-load | `h3 iperf3 -c 10.0.0.2 -u -b 1M -t 90 &`; at ~15 s `sh ovs-ofctl -O OpenFlow13 dump-flows s1` | priority=20, `udp`, `in_port=s1-eth3`, drop; `CONGESTION` in controller log | | TODO |
-| T13 | Filter cleared | Wait ~10 s after load ends; dump flows | `CONGESTION CLEARED`; rule gone | | TODO |
-| T14 | Exam during congestion | `h2 python3 app/client.py` while T12 runs | Exam completes over TCP | | TODO |
-| T15 | Idle baseline | `h2 ping -c 20 10.0.0.1`; `exam_bot.py --label idle` | RTT and per-answer latency baseline | | TODO |
-| T16 | Fairness | 5 bots on h2 + 5 on h3; two simultaneous iperf3 TCP flows; `summarize.py` | Jain index near 1.0 | | TODO |
-| T17 | Static vs dynamic under flood | h3→h1 UDP 20 Mbit/s on 10 Mbit/s links; ping + bots on h2, once per mode | Dynamic recovers after filter; static stays degraded | | TODO |
-| T18 | Concurrency + capacity | 20 bots, then a 21st (MAX=20) | 20 complete; 21st rejected | | TODO |
-| T19 | Controller outage | Stop OS-Ken mid-exam, restart | Installed flows keep forwarding; relearn after restart | | TODO |
-| T20 | Flow expiry | Idle >60 s then `pingall` | New packet-in, flows relearned | | TODO |
-| T21 | Malformed input | `h2 nc 10.0.0.1 5000`: bad JSON, wrong type, invalid letter; no answers until 120 s | Server survives; partial result | | TODO |
-| T22 | Clean-clone reproduction | Fresh clone, follow `docs/README.md` only | Works as written | | TODO |
+| T12 | UDP filter installed mid-load | `h3 iperf3 -c 10.0.0.2 -u -b 1M -t 90 &`; at ~15 s `sh ovs-ofctl -O OpenFlow13 dump-flows s1` | priority=20, `udp`, `in_port=s1-eth3`, drop; `CONGESTION` in controller log | | PASS |
+| T13 | Filter cleared | Wait ~10 s after load ends; dump flows | `CONGESTION CLEARED`; rule gone | | PASS |
+| T14 | Exam during congestion | `h2 python3 app/client.py` while T12 runs | Exam completes over TCP | | PASS |
+| T15 | Idle baseline | `h2 ping -c 20 10.0.0.1`; `exam_bot.py --label idle` | RTT and per-answer latency baseline | | PASS |
+| T16 | Fairness | 5 bots on h2 + 5 on h3; two simultaneous iperf3 TCP flows; `summarize.py` | Jain index near 1.0 | | PASS |
+| T17 | Static vs dynamic under flood | h3→h1 UDP 20 Mbit/s on 10 Mbit/s links; ping + bots on h2, once per mode | Dynamic recovers after filter; static stays degraded | | PASS |
+| T18 | Concurrency + capacity | 20 bots, then a 21st (MAX=20) | 20 complete; 21st rejected | | PASS |
+| T19 | Controller outage | Stop OS-Ken mid-exam, restart | Installed flows keep forwarding; relearn after restart | | PASS |
+| T20 | Flow expiry | Idle >60 s then `pingall` | New packet-in, flows relearned | | PASS |
+| T21 | Malformed input | `h2 nc 10.0.0.1 5000`: bad JSON, wrong type, invalid letter; no answers until 120 s | Server survives; partial result | | PASS |
+| T22 | Clean-clone reproduction | Fresh clone, follow `docs/README.md` only | Works as written | | PASS |
