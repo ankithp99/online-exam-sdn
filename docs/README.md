@@ -67,17 +67,22 @@ The network consists of one examination server, two student hosts, one Open vSwi
 ```text
 online-exam-sdn/
 ├── app/
-│   ├── client.py
-│   └── server.py
-├── docs/
-│   └── README.md
-├── mininet/
-│   └── topology.py
+│   ├── client.py          # terminal student client
+│   ├── server.py          # TCP exam server (port 5000)
+│   ├── web_api.py         # HTTP bridge for the browser UI
+│   └── web/               # browser UI (HTML/CSS/JS)
+├── docs/README.md
+├── mininet/topology.py    # h1 server, h2/h3 students, s1 switch
+├── results/               # performance.md + CSV evidence
+├── scripts/
+│   ├── measure_iperf.py   # repeatable iperf3 trials -> CSV
+│   ├── exam_bot.py        # automated exam clients (latency/load)
+│   └── summarize.py       # CSV summary + Jain fairness index
 ├── sdn/
+│   ├── congestion.py      # rate + hysteresis helpers
 │   ├── requirements.txt
-│   └── ryu_controller.py
-└── tests/
-    └── test_server.py
+│   └── ryu_controller.py  # OS-Ken learning switch + UDP filter
+└── tests/                 # unit/integration tests + test_cases.md
 ```
 
 ## 6. Application Workflow
@@ -366,3 +371,21 @@ The controller samples OpenFlow port counters every five seconds. When traffic o
 5. Save controller logs, flow-table output, and the exam result as demo evidence. If `iperf3` is not installed, install it on the Ubuntu host before the demonstration.
 
 These steps describe the expected demonstration. Do not report the dynamic scenario or concurrent exam as verified until the results have actually been observed in Mininet.
+
+## 17. Test Evidence and Reproduction
+
+All test procedures, commands and observed results are recorded in
+`tests/test_cases.md`. Measured data is in `results/` (`performance.md`,
+`iperf_trials.csv`, `bot_trials.csv`). To reproduce:
+
+1. Run the unit and integration tests: `python3 -m unittest discover -s tests -v`
+2. Start the controller and Mininet (Section 8). For bandwidth-limited runs add
+   `--link tc,bw=10` to the `mn` command.
+3. Static baseline: start the controller with
+   `CONGESTION_THRESHOLD_BPS=999999999 CLEAR_THRESHOLD_BPS=1` (filter never
+   triggers). Dynamic: start it with the defaults.
+4. Load and latency tests: `scripts/exam_bot.py`; throughput trials:
+   `scripts/measure_iperf.py`; summary and fairness: `scripts/summarize.py`.
+5. Controller logs show `PORT RATE`, `CONGESTION` and `CONGESTION CLEARED`
+   lines; check the filter with `sh ovs-ofctl -O OpenFlow13 dump-flows s1`
+   while the UDP load is running.

@@ -195,6 +195,11 @@ class OnlineExamController(app_manager.OSKenApp):
             if rate_bps is None:
                 continue
             key = (dpid, port)
+            if rate_bps >= 1000:
+                self.logger.info(
+                    "PORT RATE: dpid=%s port=%s rx=%.0f bps",
+                    dpid, port, rate_bps,
+                )
             transition = congestion_transition(
                 key in self.congested_ports,
                 rate_bps,
